@@ -18,6 +18,7 @@ package io.grpc.helloworldexample;
 
 import android.app.Activity;
 import android.content.Context;
+import android.net.LocalSocketAddress;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.support.v7.app.AppCompatActivity;
@@ -25,6 +26,7 @@ import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -33,10 +35,13 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.examples.helloworld.GreeterGrpc;
 import io.grpc.examples.helloworld.HelloReply;
 import io.grpc.examples.helloworld.HelloRequest;
+import io.grpc.okhttp.OkHttpChannelBuilder;
+import java.io.File;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.TimeUnit;
+import javax.net.SocketFactory;
 
 public class HelloworldActivity extends AppCompatActivity {
   private Button sendButton;
@@ -44,8 +49,14 @@ public class HelloworldActivity extends AppCompatActivity {
   private EditText portEdit;
   private EditText messageEdit;
   private TextView resultText;
+  private static String libError;
 
-  @Override
+    static {
+      System.loadLibrary("go");
+      libError = start();
+    }
+
+    @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_helloworld);
@@ -55,6 +66,7 @@ public class HelloworldActivity extends AppCompatActivity {
     messageEdit = (EditText) findViewById(R.id.message_edit_text);
     resultText = (TextView) findViewById(R.id.grpc_response_text);
     resultText.setMovementMethod(new ScrollingMovementMethod());
+    resultText.setText(libError);
   }
 
   public void sendMessage(View view) {
@@ -62,19 +74,24 @@ public class HelloworldActivity extends AppCompatActivity {
         .hideSoftInputFromWindow(hostEdit.getWindowToken(), 0);
     sendButton.setEnabled(false);
     resultText.setText("");
-    new GrpcTask(this)
+    File socketName = new File(getCacheDir(), "helloworld.sock");
+    new GrpcTask(this, socketName)
         .execute(
             hostEdit.getText().toString(),
             messageEdit.getText().toString(),
             portEdit.getText().toString());
   }
 
+  private static native String start();
+
   private static class GrpcTask extends AsyncTask<String, Void, String> {
     private final WeakReference<Activity> activityReference;
+    private final File socketName;
     private ManagedChannel channel;
 
-    private GrpcTask(Activity activity) {
+    private GrpcTask(Activity activity, File socketName) {
       this.activityReference = new WeakReference<Activity>(activity);
+      this.socketName = socketName;
     }
 
     @Override
@@ -84,7 +101,19 @@ public class HelloworldActivity extends AppCompatActivity {
       String portStr = params[2];
       int port = TextUtils.isEmpty(portStr) ? 0 : Integer.valueOf(portStr);
       try {
-        channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        if ("".equals(host)) {
+          ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder.forAddress("localhost", 10000).usePlaintext();
+          LocalSocketAddress address = new LocalSocketAddress(socketName.getAbsolutePath(), LocalSocketAddress.Namespace.FILESYSTEM);
+          SocketFactory socketFactory = new UnixDomainSocketFactory(address);
+          ((OkHttpChannelBuilder) channelBuilder).socketFactory(socketFactory);
+          channel = channelBuilder.build();
+          Log.i("helloworld", "Unix channel:" + channel);
+        } else {
+          ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder.forAddress(host, port).usePlaintext();
+          channel = channelBuilder.build();
+          Log.i("helloworld", "TCP channel:" + channel);
+        }
+
         GreeterGrpc.GreeterBlockingStub stub = GreeterGrpc.newBlockingStub(channel);
         HelloRequest request = HelloRequest.newBuilder().setName(message).build();
         HelloReply reply = stub.sayHello(request);

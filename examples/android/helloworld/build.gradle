@@ -6,7 +6,9 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.0.0'
+        // gradle plugin 4.0.1 required for fixing bug:
+        // https://stackoverflow.com/questions/62168227/getting-source-and-destination-must-be-different-error-while-building-project/62223434#62223434
+        classpath 'com.android.tools.build:gradle:4.0.1'
         classpath "com.google.protobuf:protobuf-gradle-plugin:0.8.17"
 
         // NOTE: Do not place your application dependencies here; they belong

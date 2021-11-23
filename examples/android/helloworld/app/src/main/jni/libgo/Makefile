@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright © 2017-2021 WireGuard LLC. All Rights Reserved.
+
+BUILDDIR ?= $(CURDIR)/build
+DESTDIR ?= $(CURDIR)/out
+
+NDK_GO_ARCH_MAP_x86 := 386
+NDK_GO_ARCH_MAP_x86_64 := amd64
+NDK_GO_ARCH_MAP_arm := arm
+NDK_GO_ARCH_MAP_arm64 := arm64
+NDK_GO_ARCH_MAP_mips := mipsx
+NDK_GO_ARCH_MAP_mips64 := mips64x
+
+CLANG_FLAGS := --target=$(ANDROID_LLVM_TRIPLE) --gcc-toolchain=$(ANDROID_TOOLCHAIN_ROOT) --sysroot=$(ANDROID_SYSROOT)
+export CGO_CFLAGS := $(CLANG_FLAGS) $(CFLAGS)
+export CGO_LDFLAGS := $(CLANG_FLAGS) $(LDFLAGS) -Wl,-soname=libgo.so
+export CC := $(ANDROID_C_COMPILER)
+export GOARCH := $(NDK_GO_ARCH_MAP_$(ANDROID_ARCH_NAME))
+export GOOS := android
+export CGO_ENABLED := 1
+export GOPATH ?= $(HOME)/go
+
+GO_VERSION := 1.17.2
+GO_PLATFORM := $(shell uname -s | tr '[:upper:]' '[:lower:]')-$(NDK_GO_ARCH_MAP_$(shell uname -m))
+GO_TARBALL := go$(GO_VERSION).$(GO_PLATFORM).tar.gz
+GO_HASH_darwin-amd64 := 7914497a302a132a465d33f5ee044ce05568bacdb390ab805cb75a3435a23f94
+GO_HASH_darwin-arm64 := ce8771bd3edfb5b28104084b56bbb532eeb47fbb7769c3e664c6223712c30904
+GO_HASH_linux-amd64 := f242a9db6a0ad1846de7b6d94d507915d14062660616a61ef7c808a76e4f1676
+
+PROTOC_GEN_GO := $(GOPATH)/bin/protoc-gen-go
+# FIXME autodetect protoc path
+PROTOC := /root/.gradle/caches/modules-2/files-2.1/com.google.protobuf/protoc/3.19.1/d231c807be82ffc29b02525c8c2691772eb945bc/protoc-3.19.1-linux-x86_64.exe
+PROTODIR = $(CURDIR)/../../proto
+PBDIR = $(CURDIR)/gen
+
+default: $(DESTDIR)/libgo.so
+
+$(GRADLE_USER_HOME)/caches/golang/$(GO_TARBALL):
+	mkdir -p "$(dir $@)"
+	flock "$@.lock" -c ' \
+	[ -f "$@" ] && exit 0; \
+	curl -o "$@.tmp" "https://dl.google.com/go/$(GO_TARBALL)" && \
+	echo "$(GO_HASH_$(GO_PLATFORM))  $@.tmp" | sha256sum -c && \
+	mv "$@.tmp" "$@"'
+
+$(BUILDDIR)/go-$(GO_VERSION)/.prepared: $(GRADLE_USER_HOME)/caches/golang/$(GO_TARBALL)
+	mkdir -p "$(dir $@)"
+	flock "$@.lock" -c ' \
+	[ -f "$@" ] && exit 0; \
+	tar -C "$(dir $@)" --strip-components=1 -xzf "$^" && \
+	patch -p1 -f -N -r- -d "$(dir $@)" < goruntime-boottime-over-monotonic.diff && \
+	touch "$@"'
+
+$(PROTOC_GEN_GO): export GOARCH :=
+$(PROTOC_GEN_GO): export GOOS :=
+$(PROTOC_GEN_GO): export PATH := $(BUILDDIR)/go-$(GO_VERSION)/bin/:$(PATH)
+$(PROTOC_GEN_GO): $(BUILDDIR)/go-$(GO_VERSION)/.prepared Makefile
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.26
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.1
+
+$(PBDIR)/%.pb.go: export PATH := $(GOPATH)/bin:$(PATH)
+$(PBDIR)/%.pb.go: $(PROTODIR)/%.proto $(BUILDDIR)/go-$(GO_VERSION)/.prepared $(PROTOC_GEN_GO)
+#	$(PROTOC) -I $(PROTODIR) --go_out $(PBDIR) $<
+#	$(PROTOC) -I $(PROTODIR) --go_out=plugins=grpc:./gen --go_opt=paths=source_relative $<
+	$(PROTOC) -I $(PROTODIR) --go_out=paths=source_relative:./gen $<
+	$(PROTOC) -I $(PROTODIR) --go-grpc_out=./gen --go-grpc_opt=paths=source_relative $<
+
+$(DESTDIR)/libgo.so: export PATH := $(BUILDDIR)/go-$(GO_VERSION)/bin/:$(PATH)
+$(DESTDIR)/libgo.so: $(BUILDDIR)/go-$(GO_VERSION)/.prepared go.mod api-android.go Makefile $(PBDIR)/helloworld.pb.go jni.c
+	go build -tags linux -ldflags="-X main.socketDirectory=/data/data/$(ANDROID_PACKAGE_NAME)/cache" -v -trimpath -o "$@" -buildmode c-shared
+
+.DELETE_ON_ERROR:
